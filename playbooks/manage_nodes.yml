@@ -1,0 +1,26 @@
+---
+- hosts: controller
+  vars:
+    slurm_mode: "compute-ctld"
+  roles:
+    - get_nodes_in_cluster
+    - prometheus_targets
+    - slurm
+
+    #- fix_ldap_add_node
+
+- hosts: controller
+  become: true
+  vars:
+    ansible_user: "{% if ansible_facts['os_family'] == 'RedHat' %}opc{% else %}ubuntu{% endif %}"
+  tasks:
+    - include_role:
+        name: docker
+    - include_role:
+        name: nextflow
+    - name: Ensure /run/docker.sock is owned by root:ubuntu
+      ansible.builtin.file:
+        path: /run/docker.sock
+        owner: root
+        group: ubuntu
+        mode: '0777'

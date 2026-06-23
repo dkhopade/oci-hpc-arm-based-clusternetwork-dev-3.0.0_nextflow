@@ -1,0 +1,386 @@
+---
+- name: Set Python/UV facts from venv
+  set_fact:
+    python_executable: "{{ venv_path }}/bin/python3"
+    uv_cmd: "{{ (venv_path | regex_replace('/oci$', '')) ~ '/uv' }}"
+
+- name: Verify venv Python exists
+  stat:
+    path: "{{ python_executable }}"
+  register: venv_python_stat
+  failed_when: not venv_python_stat.stat.exists
+
+- name: Get Python version from venv
+  command: "{{ python_executable }} --version"
+  register: python_version_output
+  changed_when: false
+
+# Extract version number for backward compatibility with templates
+- name: Extract Python version number
+  set_fact:
+    python_version: "{{ python_version_output.stdout | regex_replace('^Python ([0-9]+\\.[0-9]+).*', '\\1') }}"
+
+- name: Display detected Python
+  debug:
+    msg: "Using Python: {{ python_executable }} (version {{ python_version }})"
+
+# ----------------- Ensure OpenAPI download directory -----------------
+- name: Ensure OpenAPI download dir
+  file:
+    path: "{{ openapi_download_path }}"
+    state: directory
+    mode: '0755'
+  become: true
+
+# ----------------- OpenAPI Generator JAR -----------------
+- name: Download openapi-generator jar directly
+  get_url:
+    url: "https://repo1.maven.org/maven2/org/openapitools/openapi-generator-cli/{{ openapi_generator_jar_version }}/openapi-generator-cli-{{ openapi_generator_jar_version }}.jar"
+    dest: "{{ openapi_download_path }}/openapi-generator.jar"
+    mode: '0644'
+    validate_certs: "{{ false if ansible_facts['distribution'] == 'OracleLinux' else true }}"
+  environment: "{{ {'SSL_CERT_FILE': '/etc/pki/tls/certs/ca-bundle.crt', 'REQUESTS_CA_BUNDLE': '/etc/pki/tls/certs/ca-bundle.crt'} if ansible_facts['distribution'] == 'OracleLinux' else {} }}"
+  become: true
+
+- name: Verify jar file exists
+  stat:
+    path: "{{ openapi_download_path }}/openapi-generator.jar"
+  register: jar_stat
+  failed_when: not jar_stat.stat.exists
+
+- name: Ensure munge is running before Slurm REST SDK setup
+  become: true
+  ansible.builtin.service:
+    name: munge
+    state: started
+    enabled: true
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Restart Slurm controller services before Slurm REST SDK setup
+  become: true
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: restarted
+    enabled: true
+  with_items: "{{ ['slurmctld'] if slurm_federation | bool else ['slurmdbd', 'slurmctld'] }}"
+  register: slurm_rest_controller_restart
+  until: slurm_rest_controller_restart is not failed
+  retries: 5
+  delay: 5
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Wait for slurmctld service to become active
+  become: true
+  ansible.builtin.command: "systemctl is-active slurmctld"
+  register: slurmctld_active
+  until: slurmctld_active.rc == 0
+  retries: 24
+  delay: 5
+  changed_when: false
+  failed_when: false
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Wait for Slurm controller RPC to become reachable
+  ansible.builtin.command: "timeout 20 scontrol ping"
+  become: true
+  become_user: "{{ slurm_user }}"
+  register: slurm_controller_ping
+  until: slurm_controller_ping.rc == 0
+  retries: 18
+  delay: 10
+  changed_when: false
+  failed_when: false
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Capture slurmctld status when Slurm controller RPC is unreachable
+  become: true
+  ansible.builtin.command: "systemctl status slurmctld --no-pager -l"
+  register: slurmctld_status
+  changed_when: false
+  failed_when: false
+  when: slurm_controller_ping.rc != 0
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Capture slurmdbd status when Slurm controller RPC is unreachable
+  become: true
+  ansible.builtin.command: "systemctl status slurmdbd --no-pager -l"
+  register: slurmdbd_status
+  changed_when: false
+  failed_when: false
+  when: slurm_controller_ping.rc != 0 and not (slurm_federation | bool)
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Capture slurmctld journal when Slurm controller RPC is unreachable
+  become: true
+  ansible.builtin.command: "journalctl -u slurmctld -n 120 --no-pager"
+  register: slurmctld_journal
+  changed_when: false
+  failed_when: false
+  when: slurm_controller_ping.rc != 0
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Capture slurmdbd journal when Slurm controller RPC is unreachable
+  become: true
+  ansible.builtin.command: "journalctl -u slurmdbd -n 120 --no-pager"
+  register: slurmdbd_journal
+  changed_when: false
+  failed_when: false
+  when: slurm_controller_ping.rc != 0 and not (slurm_federation | bool)
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Capture slurmctld log when Slurm controller RPC is unreachable
+  become: true
+  ansible.builtin.command: "tail -n 120 /var/log/slurm/slurmctld.log"
+  register: slurmctld_log
+  changed_when: false
+  failed_when: false
+  when: slurm_controller_ping.rc != 0
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Capture slurmdbd log when Slurm controller RPC is unreachable
+  become: true
+  ansible.builtin.command: "tail -n 120 /var/log/slurm/slurmdbd.log"
+  register: slurmdbd_log
+  changed_when: false
+  failed_when: false
+  when: slurm_controller_ping.rc != 0 and not (slurm_federation | bool)
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Test slurmctld configuration when Slurm controller RPC is unreachable
+  become: true
+  ansible.builtin.command: "{{ slurm_exec }}/sbin/slurmctld -t"
+  register: slurmctld_config_test
+  changed_when: false
+  failed_when: false
+  when: slurm_controller_ping.rc != 0
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Fail if Slurm controller RPC is unreachable
+  ansible.builtin.fail:
+    msg: |
+      Slurm controller did not become reachable before Slurm REST SDK setup.
+      systemctl is-active slurmctld rc={{ slurmctld_active.rc | default('unknown') }}
+      scontrol ping rc={{ slurm_controller_ping.rc | default('unknown') }}
+      scontrol ping stderr={{ slurm_controller_ping.stderr | default('') }}
+      slurmctld config test stdout:
+      {{ slurmctld_config_test.stdout | default('not captured') }}
+      slurmctld config test stderr:
+      {{ slurmctld_config_test.stderr | default('not captured') }}
+      slurmctld status:
+      {{ slurmctld_status.stdout | default('not captured') }}
+      slurmdbd status:
+      {{ slurmdbd_status.stdout | default('not captured') }}
+      slurmctld journal:
+      {{ slurmctld_journal.stdout | default('not captured') }}
+      slurmdbd journal:
+      {{ slurmdbd_journal.stdout | default('not captured') }}
+      slurmctld log:
+      {{ slurmctld_log.stdout | default('not captured') }}
+      slurmdbd log:
+      {{ slurmdbd_log.stdout | default('not captured') }}
+  when: slurm_controller_ping.rc != 0
+  delegate_to: 127.0.0.1
+  run_once: true
+
+# ----------------- JWT + OpenAPI Spec -----------------
+- name: Generate JWT token
+  command: "timeout 30 scontrol token lifespan=infinite"
+  become: true
+  become_user: "{{ slurm_user }}"
+  register: jwt_token_result
+  until: jwt_token_result.rc == 0
+  retries: 6
+  delay: 10
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Save JWT token to file
+  copy:
+    content: "{{ jwt_token_result.stdout }}"
+    dest: "{{ slurm_jwt_token_path }}"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: "0600"
+  become: true
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Read JWT token from file
+  slurp:
+    src: "{{ slurm_jwt_token_path }}"
+  register: jwt_token_file
+  become: true
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Set JWT token fact
+  set_fact:
+    slurm_jwt_token: "{{ (jwt_token_file.content | b64decode).split('=')[1] }}"
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Restart slurmrestd after Slurm controller and JWT are ready
+  become: true
+  ansible.builtin.service:
+    name: "{{ slurmrestd_service }}"
+    daemon_reload: true
+    state: restarted
+    enabled: true
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Wait for slurmrestd to listen on port 6820
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 6820
+    delay: 1
+    timeout: 60
+  register: slurmrestd_port
+  failed_when: false
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Set slurmrestd listen status
+  ansible.builtin.set_fact:
+    slurmrestd_listening: "{{ slurmrestd_port.state | default('') == 'started' }}"
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Capture slurmrestd status when REST API is not listening
+  become: true
+  ansible.builtin.command: "systemctl status {{ slurmrestd_service }} --no-pager -l"
+  register: slurmrestd_status
+  changed_when: false
+  failed_when: false
+  when: not slurmrestd_listening
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Capture slurmrestd journal when REST API is not listening
+  become: true
+  ansible.builtin.command: "journalctl -u {{ slurmrestd_service }} -n 120 --no-pager"
+  register: slurmrestd_journal
+  changed_when: false
+  failed_when: false
+  when: not slurmrestd_listening
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Fail if Slurm REST API is not listening
+  ansible.builtin.fail:
+    msg: |
+      slurmrestd did not listen on port 6820 before OpenAPI fetch.
+      slurmrestd wait result={{ slurmrestd_port | default({}) }}
+      slurmrestd status:
+      {{ slurmrestd_status.stdout | default('not captured') }}
+      slurmrestd journal:
+      {{ slurmrestd_journal.stdout | default('not captured') }}
+  when: not slurmrestd_listening
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Fetch Slurm API versions
+  ansible.builtin.uri:
+    url: "{{ slurm_rest_api_spec_url }}"
+    return_content: true
+    headers:
+      X-SLURM-USER-NAME: "{{ slurm_user }}"
+      X-SLURM-USER-TOKEN: "{{ slurm_jwt_token }}"
+  register: api_response
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Extract all version strings
+  ansible.builtin.set_fact:
+    version_strings: >-
+      {{ api_response.content | regex_findall('slurm_v([0-9]+)_get_jobs') }}
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Set highest version string
+  ansible.builtin.set_fact:
+    slurm_api_version: >-
+      {{ version_strings | max | string }}
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Download Slurm OpenAPI spec
+  uri:
+    url: "{{ slurm_rest_api_spec_url }}"
+    dest: "{{ openapi_download_path }}/{{ slurm_rest_api_spec_filename }}"
+    headers:
+      X-SLURM-USER-NAME: "{{ slurm_user }}"
+      X-SLURM-USER-TOKEN: "{{ slurm_jwt_token }}"
+  become: true
+  delegate_to: 127.0.0.1
+  run_once: true
+# ----------------- Generate SDK -----------------
+- name: Ensure SDK output directory
+  file:
+    path: "{{ sdk_output_dir }}"
+    state: directory
+  become: true
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Generate Slurm python SDK from OpenAPI
+  command:
+    cmd: >
+      java -jar {{ openapi_download_path }}/openapi-generator.jar generate
+      -g python
+      -i {{ openapi_download_path }}/{{ slurm_rest_api_spec_filename }}
+      -o {{ sdk_output_dir }}/
+    chdir: "{{ openapi_download_path }}"
+  become: true
+  delegate_to: 127.0.0.1
+  run_once: true
+
+# ----------------- Build & install SDK wheel using venv -----------------
+- name: Build slurm sdk python wheel using venv
+  command:
+    cmd: "{{ python_executable }} setup.py bdist_wheel"
+    chdir: "{{ sdk_output_dir }}"
+  become: true
+  register: build_sdk_wheel
+  changed_when: "'Building' in build_sdk_wheel.stdout or 'Wrote' in build_sdk_wheel.stdout"
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Install slurm sdk wheel into venv with uv
+  ansible.builtin.shell: |
+    {{ uv_cmd }} pip install \
+      -p {{ python_executable }} \
+      --force-reinstall --upgrade {{ sdk_output_dir }}/dist/*.whl
+  args:
+    chdir: "{{ sdk_output_dir }}"
+  environment:
+    UV_PYTHON: "{{ python_executable }}"
+  become: true
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Verify SDK installation
+  command: "{{ python_executable }} -c \"import importlib; importlib.import_module('openapi_client')\""
+  register: sdk_verify
+  changed_when: false
+  failed_when: sdk_verify.rc != 0
+  become: true
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Display SDK installation info
+  debug:
+    msg: "{{ sdk_verify.stdout_lines }}"
+  delegate_to: 127.0.0.1
+  run_once: true

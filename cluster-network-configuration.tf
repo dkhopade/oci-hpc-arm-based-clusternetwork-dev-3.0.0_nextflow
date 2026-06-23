@@ -1,0 +1,98 @@
+resource "oci_core_instance_configuration" "cluster-network-instance_configuration" {
+  count          = var.rdma_enabled && (!var.stand_alone || var.cluster_network_shape == "BM.GPU.GB200.4" || var.cluster_network_shape == "BM.GPU.GB200-v2.4" || var.cluster_network_shape == "BM.GPU.GB200-v3.4" || var.cluster_network_shape == "BM.GPU.GB300.4") ? 1 : 0
+  depends_on     = [oci_core_app_catalog_subscription.mp_image_subscription, oci_core_shape_management.compute-shape]
+  compartment_id = var.targetCompartment
+  display_name   = local.cluster_name
+
+  freeform_tags = {
+    "cluster_name"    = local.cluster_name
+    "controller_name" = "${local.cluster_name}-controller"
+  }
+
+  instance_details {
+    instance_type = "compute"
+    launch_details {
+      availability_domain = var.ad
+      compartment_id      = var.targetCompartment
+      create_vnic_details {
+        subnet_id        = local.subnet_id
+        assign_public_ip = false
+      }
+      freeform_tags = {
+        "cluster_name"        = local.cluster_name
+        "controller_name"     = oci_core_instance.controller.display_name
+        "hostname_convention" = var.hostname_convention
+        "memory_cluster_name" = var.cluster_network_shape == "BM.GPU.GB200.4" || var.cluster_network_shape == "BM.GPU.GB200-v2.4" || var.cluster_network_shape == "BM.GPU.GB200-v3.4" || var.cluster_network_shape == "BM.GPU.GB300.4" ? "${local.cluster_name}-fabric1" : ""
+      }
+      metadata = {
+        # TODO: add user key to the authorized_keys 
+        ssh_authorized_keys = var.compute_node_ssh_key == "" ? "${var.ssh_key}\n${tls_private_key.ssh.public_key_openssh}" : "${var.ssh_key}\n${tls_private_key.ssh.public_key_openssh}${var.compute_node_ssh_key}\n"
+        user_data           = base64encode(file("cloud-init.sh"))
+      }
+      instance_options {
+        are_legacy_imds_endpoints_disabled = true
+      }
+      agent_config {
+
+        are_all_plugins_disabled = false
+        is_monitoring_disabled   = false
+
+        plugins_config {
+          desired_state = "DISABLED"
+          name          = "OS Management Service Agent"
+        }
+        dynamic "plugins_config" {
+
+          for_each = var.rdma_enabled ? ["ENABLED"] : ["DISABLED"]
+          content {
+            name          = "Compute HPC RDMA Authentication"
+            desired_state = plugins_config.value
+          }
+        }
+        dynamic "plugins_config" {
+          for_each = var.rdma_enabled ? ["ENABLED"] : ["DISABLED"]
+          content {
+            name          = "Compute HPC RDMA Auto-Configuration"
+            desired_state = plugins_config.value
+          }
+        }
+        dynamic "plugins_config" {
+          for_each = length(regexall(".*GPU.*", var.cluster_network_shape)) > 0 ? ["ENABLED"] : ["DISABLED"]
+          content {
+            name          = "Compute RDMA GPU Monitoring"
+            desired_state = plugins_config.value
+          }
+        }
+      }
+
+      dynamic "platform_config" {
+        for_each = var.BIOS ? range(1) : []
+        content {
+          type                                           = local.platform_type
+          are_virtual_instructions_enabled               = var.virt_instr
+          is_access_control_service_enabled              = var.access_ctrl
+          is_input_output_memory_management_unit_enabled = var.IOMMU
+          is_symmetric_multi_threading_enabled           = var.SMT
+          numa_nodes_per_socket                          = var.numa_nodes_per_socket == "Default" ? (local.platform_type == "GENERIC_BM" ? "NPS1" : "NPS4") : var.numa_nodes_per_socket
+          percentage_of_cores_enabled                    = var.percentage_of_cores_enabled == "Default" ? 100 : tonumber(var.percentage_of_cores_enabled)
+        }
+      }
+
+
+      shape = var.cluster_network_shape
+      source_details {
+        source_type             = "image"
+        boot_volume_size_in_gbs = var.boot_volume_size
+        boot_volume_vpus_per_gb = 30
+        image_id                = local.compute_image
+      }
+    }
+  }
+
+  source = "NONE"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+

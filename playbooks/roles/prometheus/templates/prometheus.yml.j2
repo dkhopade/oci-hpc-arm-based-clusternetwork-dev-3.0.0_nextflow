@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 60s
+  external_labels:
+    monitor: 'prometheus'
+
+rule_files:
+- recording_rules.yml
+
+scrape_configs:
+- job_name: prometheus
+  file_sd_configs:
+  - files:
+    - '/etc/prometheus/targets/*.json'
+
+- job_name: prometheus-self
+  static_configs:
+  - targets: ['localhost:9090']
+
+{% if metrics_stream_ocid | default('') | length > 0 %}
+- job_name: oci-metrics
+  honor_timestamps: true
+  static_configs:
+  - targets:
+    - {{ oci_metrics_host }}:{{ telegraf_prometheus_port }}
+{% endif %}

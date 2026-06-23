@@ -1,0 +1,20 @@
+[Unit]
+Description=Realtime GPU,CPU compute and memory utilization for slurm jobs
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User={{ ansible_user }}
+Group={{ ansible_user }}
+Type=simple
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:$PATH
+Environment=SCONTROL_PATH=/usr/local/bin/scontrol
+{% if 'BM.GPU.MI' in shape %}
+Environment=CPU_ONLY_MODE=True
+{% endif %}
+ExecStart={{venv_path}}/bin/python3 /usr/local/bin/nvml_metrics_exporter.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,292 @@
+---
+# tasks file for openldap
+- name: Create /etc/opt/oci-hpc/passwords/openldap
+  become: true
+  file:
+    path: /etc/opt/oci-hpc/passwords/openldap
+    state: directory
+    owner: opc
+    mode: "0770"
+    group: opc
+    recurse: true
+
+- name: Install dependencies (OL8, OL9)
+  vars:
+    package_name: policycoreutils-python-utils
+    package_state: present
+  include_role:
+    name: safe_yum
+
+- block:
+    - name: Install OpenLDAP servers (OL8)
+      ansible.builtin.yum:
+        name: https://vault.centos.org/centos/8/PowerTools/{{ ansible_facts['architecture'] }}/os/Packages/openldap-servers-2.4.46-18.el8.{{ ansible_facts['architecture'] }}.rpm
+        state: present
+        disable_gpg_check: true
+  when: ansible_facts['distribution_major_version'] == '8'
+
+- name: Install OpenLDAP packages (OL8, OL9)
+  vars:
+    package_name: >-
+      {{
+        openldap_packages_ol8 if ansible_facts['distribution_major_version'] == '8' else
+        openldap_packages_ol9
+      }}
+  include_role:
+    name: safe_yum
+
+- name: Create sysconfig-slapd
+  ansible.builtin.copy:
+    content: ""
+    dest: /etc/sysconfig/slapd
+    mode: "0644"
+  when: ansible_facts['distribution_major_version'] in ["8", "9"]
+
+- name: Generate openldap root password
+  set_fact:
+    tmp_pwd: "{{ lookup('password',
+                          '/etc/opt/oci-hpc/passwords/openldap/root.txt',
+                          chars=['ascii_letters', 'digits', 'hexdigits']) }}"
+  run_once: true
+  delegate_to: 127.0.0.1
+
+- name: Get openldap root password
+  set_fact:
+    openldap_root_pwd: "{{ lookup('password',
+                          '/etc/opt/oci-hpc/passwords/openldap/root.txt',
+                          chars=['ascii_letters', 'digits', 'hexdigits']) }}"
+  run_once: true
+  delegate_to: 127.0.0.1
+
+- block:
+    - name: Write openldap root password to backup
+      copy:
+        content: "{{ openldap_root_pwd }}"
+        dest: "/etc/opt/oci-hpc/passwords/openldap/root.txt"
+      delegate_to: "{{ groups['slurm_backup'] | default([]) | first | default(omit) }}"
+  when:
+    - groups['slurm_backup'] is defined
+    - groups['slurm_backup'] | length > 0
+
+- name: Hash OpenLDAP root password
+  command: slappasswd -h {SSHA} -s {{ openldap_root_pwd }}
+  register: openldap_root_pwd_hash
+  changed_when: false
+
+- name: Selinux fcontext on files
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  sefcontext:
+    target: "{{ openldap_server_conf_path }}(/.*)?"
+    setype: slapd_db_t
+  when:
+    - ansible_facts['selinux'] is defined
+    - ansible_facts['selinux'] != false
+    - ansible_facts['selinux']['status'] == 'enabled'
+
+- name: Adjust OpenLDAP server TLS configuration
+  lineinfile:
+    path: "{{ openldap_server_defaults_file }}"
+    regexp: "^SLAPD_URLS="
+    line: 'SLAPD_URLS="{{ openldap_endpoints }}"'
+
+- name: Adjust OpenLDAP client TLS configuration
+  lineinfile:
+    path: "/etc/openldap/ldap.conf"
+    line: "TLS_CACERT /etc/openldap/certs/cluster-ca.crt"
+
+- name: Enable OpenLDAP service
+  systemd:
+    name: slapd
+    enabled: true
+
+- name: Get /etc/openldap/slapd.d status
+  stat:
+    path: "/etc/openldap/slapd.d"
+  register: default_openldap_path
+
+- name: Add cluster CA certificate to /etc/openldap/certs
+  copy:
+    src: "{{ openldap_tls_cacrt }}"
+    dest: "/etc/openldap/certs/"
+
+- name: Ensure OpenLDAP has access to the ssl certificates
+  user:
+    name: "{{ openldap_default_user }}"
+    groups: "{{ ssl_cert_group }}"
+
+- name: Update /etc/openldap/ldap.conf
+  lineinfile:
+    dest: /etc/openldap/ldap.conf
+    line: TLS_REQSAN allow
+  when: ansible_facts['distribution_major_version'] in ["8", "9"]
+
+- name: Ensure OpenLDAP data directory exists
+  file:
+    path: "{{ openldap_server_dir_path }}"
+    state: directory
+    owner: "{{ openldap_default_user }}"
+    group: "{{ openldap_default_group }}"
+    setype: slapd_db_t
+    seuser: system_u
+
+- name: Start OpenLDAP service
+  systemd:
+    name: slapd
+    state: started
+    enabled: true
+
+- block:
+    - name: Copy OpenLDAP schemas (OL8 or OL9)
+      copy:
+        src: "{{ item }}"
+        dest: "/etc/openldap/schema/"
+        owner: "{{ openldap_default_user }}"
+        group: "{{ openldap_default_group }}"
+        mode: "0644"
+      with_items:
+        - rfc2307bis.ldif
+        - sudo.ldif
+        - autoinc.ldif
+        - local_schema.ldif
+        - local_policy.ldif
+
+    - name: Copy `ppolicy.ldif` only for OL9
+      copy:
+        src: "el_ppolicy_ol8.ldif"
+        dest: "/etc/openldap/schema/ppolicy.ldif"
+        owner: "{{ openldap_default_user }}"
+        group: "{{ openldap_default_group }}"
+        mode: "0644"
+      when: ansible_facts['distribution_major_version'] == "9"
+
+    - name: Copy `memberof.ldif` schemas (OL8 or OL9)
+      copy:
+        src: "el_memberof_ol8.ldif"
+        dest: "/tmp/memberof.ldif"
+        owner: "{{ openldap_default_user }}"
+        group: "{{ openldap_default_group }}"
+        mode: "0644"
+      when: ansible_facts['distribution_major_version'] in ["8", "9"]
+
+    - name: Render OpenLDAP configuration templates (OL8 or OL9)
+      template:
+        src: "{{ item.src }}"
+        dest: "/tmp/{{ item.dest }}"
+        owner: "{{ openldap_default_user }}"
+        group: "{{ openldap_default_group }}"
+        mode: "0644"
+      with_items:
+        - { src: "config.ldif.j2", dest: "config.ldif" }
+        - { src: "{{ 'el_local_ol9.ldif.j2' if ansible_facts['distribution_major_version'] == '9' else 'el_local_ol8.ldif.j2' }}", dest: "local.ldif" }
+  when: ansible_facts['distribution_major_version'] in ["8", "9"]
+
+- name: Find matching files
+  ansible.builtin.find:
+    paths: "/etc/openldap/slapd.d/cn=config/cn=schema/"
+    patterns: "cn=*{{ item }}.ldif"
+    file_type: file
+  register: openldap_schemas_output
+  with_items: "{{ openldap_schemas }}"
+
+- name: Load OpenLDAP schemas and configs (OL8, OL9)
+  command: ldapadd -c -Y EXTERNAL -H ldapi:/// -Q -f /etc/openldap/schema/{{ item.item }}.ldif
+  with_items: "{{ openldap_schemas_output.results }}"
+  when: item.files | length == 0
+  ignore_errors: true
+
+- name: Load OpenLDAP global configuration (OL8, OL9)
+  command: ldapmodify -c -Y EXTERNAL -H ldapi:/// -Q -f /tmp/config.ldif
+  args:
+    creates: "/etc/openldap/slapd.d/cn=config.ldif"
+  notify: Restart openldap
+
+- name: Restart openldap
+  service:
+    name: slapd
+    state: restarted
+    enabled: true
+  when: ansible_facts['distribution_major_version'] in ["8", "9"]
+
+- name: Load OpenLDAP local configuration (OL8, OL9)
+  command: ldapmodify -c -Y EXTERNAL -H ldapi:/// -Q -f /tmp/{{ item }}
+  args:
+    creates: "/etc/openldap/slapd.d/cn=config/olcDatabase={?}mdb/olcOverlay={0}memberof.ldif"
+  with_items:
+    - config.ldif
+    - local.ldif
+    - memberof.ldif
+  notify: Restart openldap
+  when: ansible_facts['distribution_major_version'] in ["8", "9"]
+
+- name: Check local base DN
+  command: ldapsearch -H ldapi:// -Y EXTERNAL -b "dc=local" -s base "(objectClass=*)"
+  register: ldap_base_search
+  failed_when: false
+  changed_when: false
+
+- name: Load OpenLDAP local schema
+  command: >
+    ldapadd -x -H ldaps:// -D "cn=manager,dc=local" -w {{ openldap_root_pwd }}
+                         -f /etc/openldap/schema/local_schema.ldif
+  when: ldap_base_search.rc == 32
+
+- name: Check ppolicy schema availability
+  command: ldapsearch -H ldapi:// -Y EXTERNAL -b "cn=schema,cn=config" "(cn=*ppolicy*)" dn
+  register: ldap_ppolicy_schema_search
+  failed_when: false
+  changed_when: false
+
+- name: Check local password policy
+  command: ldapsearch -H ldapi:// -Y EXTERNAL -b "dc=local" "cn=pwdDefaultPolicy,ou=Policies,dc=local"
+  register: ldap_policy_search
+  failed_when: false
+  changed_when: false
+  when: ldap_ppolicy_schema_search.rc == 0
+
+- name: Load OpenLDAP local password policy
+  command: >
+    ldapadd -x -H ldaps:// -D "cn=manager,dc=local" -w {{ openldap_root_pwd }}
+                         -f /etc/openldap/schema/local_policy.ldif
+  when:
+    - ldap_ppolicy_schema_search.rc == 0
+    - (ldap_policy_search.rc | default(1)) == 32
+
+- name: Enable replication
+  when:
+    - groups['slurm_backup'] is defined
+    - groups['slurm_backup'] | length > 0
+  block:
+    - name: Copy OpenLDAP schemas (OL8, OL9)
+      template:
+        src: '{{ item }}.j2'
+        dest: '/tmp/{{ item }}'
+        owner: '{{ openldap_default_user }}'
+        group: '{{ openldap_default_group }}'
+        mode: '0640'
+      become: true
+      with_items:
+        - mod_syncprov_el.ldif
+        - replicate_config.ldif
+        - replicate_database_el_mdb.ldif
+      when: ansible_facts['distribution_major_version'] in ["8", "9"]
+
+    - name: Add syncprov module to openLDAP
+      shell: 'ldapadd -c -Y EXTERNAL -H ldapi:/// -Q -f /tmp/mod_syncprov_el.ldif'
+      ignore_errors: true  #set to get around erroring out that items already exist
+      become: true
+
+    - name: Add replicate configuration to openLDAP
+      shell: 'ldapadd -c -Y EXTERNAL -H ldapi:/// -Q -f /tmp/replicate_config.ldif'
+      ignore_errors: true  #set to get around erroring out that items already exist
+      become: true
+
+    - name: Add replicate database to openLDAP (OL8, OL9)
+      shell: 'ldapadd -c -Y EXTERNAL -H ldapi:/// -Q -f /tmp/replicate_database_el_mdb.ldif'
+      ignore_errors: true  #set to get around erroring out that items already exist
+      become: true
+      when: ansible_facts['distribution_major_version'] in ["8", "9"]
+      notify: Restart openldap
+
+
+- meta: flush_handlers

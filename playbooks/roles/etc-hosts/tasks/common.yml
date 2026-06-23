@@ -1,0 +1,36 @@
+---
+- name: Create controller part of the /etc/hosts files for the compute nodes
+  blockinfile:
+    dest: /tmp/hosts.etc.{{ cluster_name }}
+    content: "{{ lookup('template', 'templates/etc-hosts-controller.j2') }}"
+    state: present
+    create: true
+    marker: "# {mark} ANSIBLE MANAGED BLOCK controller"
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Create controller part of the /etc/hosts files for the controller
+  blockinfile:
+    dest: /etc/hosts
+    content: "{{ lookup('template', 'templates/etc-hosts-controller.j2') }}"
+    state: present
+    create: true
+    marker: "# {mark} ANSIBLE MANAGED BLOCK controller"
+  delegate_to: 127.0.0.1
+  run_once: true
+
+- name: Move /etc/hosts on backup slurm, login node and monitoring node
+  become: true
+  copy:
+    dest: /etc/hosts
+    src: /etc/hosts
+    force: true
+  when: (('slurm_backup' in group_names) or ('login' in group_names) or ('monitoring' in group_names))
+
+- name: Make sure the IP for each node was not left over in another cluster
+  become: true
+  lineinfile:
+    dest: /etc/hosts
+    regexp: "^127.0.1.1\\s{{ hostvars[groups['controller'][0]]['inventory_hostname'] }}.*"
+    state: absent
+  when: (('slurm_backup' in group_names) or ('login' in group_names) or ('monitoring' in group_names))

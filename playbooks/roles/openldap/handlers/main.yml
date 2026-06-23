@@ -1,0 +1,9 @@
+---
+# handler file for openldap
+
+- name: Restart openldap
+  service:
+    name: slapd
+    state: restarted
+    enabled: true
+  when: primary|default(True)

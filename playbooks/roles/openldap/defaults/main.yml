@@ -1,0 +1,29 @@
+---
+# common vars file for openldap
+
+openldap_server_dir_path: /var/lib/ldap
+
+openldap_endpoints: ldap:/// ldaps:/// ldapi:///
+openldap_host: "controller.cluster"
+
+ssl_cert_path: "/etc/ssl/certs"
+ssl_cert_group: "{{ openldap_default_user }}"
+
+openldap_tls_cacrt: "{{ ssl_ca_cert }}"
+openldap_tls_crt: "{{ ssl_cert_path }}/{{ ansible_facts['fqdn'] }}.crt"
+openldap_tls_key: "{{ ssl_cert_path }}/{{ ansible_facts['fqdn'] }}.key"
+
+openldap_schemas:
+  - cosine
+  - inetorgperson
+  - rfc2307bis
+  - autoinc
+  - ppolicy
+  - sudo
+
+openldap_schemas_22:
+  - cosine
+  - inetorgperson
+  - rfc2307bis
+  - autoinc
+  - sudo

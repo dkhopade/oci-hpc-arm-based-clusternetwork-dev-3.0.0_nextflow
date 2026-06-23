@@ -1,0 +1,64 @@
+---
+- ansible.builtin.include_vars: el_vars.yml
+  when: ansible_facts['os_family'] == 'RedHat' and ansible_facts['distribution'] == 'OracleLinux'
+
+- ansible.builtin.include_vars: centos_vars.yml
+  when: ansible_facts['os_family'] == 'RedHat' and ansible_facts['distribution'] == 'CentOS'
+
+- ansible.builtin.include_vars: ubuntu_vars.yml
+  when: ansible_facts['distribution'] == 'Ubuntu'
+
+- when: slurm_mode == 'controller'
+
+  block:
+    - name: Run common instructions
+      ansible.builtin.include_tasks: common.yml
+    - name: Run server directives
+      ansible.builtin.include_tasks: server.yml
+      when: ('controller' in group_names)
+
+    - name: Run login/monitoring server directives
+      ansible.builtin.include_tasks: login.yml
+      when: ('monitoring' in group_names)
+
+    - name: Run backup server directives
+      ansible.builtin.include_tasks: backup_server.yml
+      when: ('slurm_backup' in group_names)
+
+    - name: Move topology.conf on backup slurm controller
+      ansible.builtin.include_tasks: move-topology.yml
+      when: ('slurm_backup' in group_names)
+
+- when: slurm_mode == 'compute-ctld'
+
+  block:
+    - name: Run compute directives on the controller for add
+      ansible.builtin.include_tasks: "compute-ctld.yml"
+      when: new_compute_info | length > 0
+
+    - name: Run compute directives on the controller for destroy
+      ansible.builtin.include_tasks: "remove-ctld.yml"
+      when: remove_compute_info | length > 0
+
+    - name: Move topology.conf on backup slurm controller
+      ansible.builtin.include_tasks: move-topology.yml
+      when: ('slurm_backup' in group_names)
+
+- when: slurm_mode == 'compute'
+
+  block:
+    - name: Run common instructions
+      ansible.builtin.include_tasks: common.yml
+    - name: Run compute directives
+      ansible.builtin.include_tasks: "compute.yml"
+- when: slurm_mode == 'login'
+  block:
+    - name: Run common instructions
+      ansible.builtin.include_tasks: common.yml
+    - name: Run compute directives
+      ansible.builtin.include_tasks: "login.yml"
+
+- when: slurm_mode == 're-init'
+  block:
+    - name: Run common instructions
+      ansible.builtin.include_tasks: re-init.yml

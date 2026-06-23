@@ -1,0 +1,36 @@
+---
+- name: Add key
+  ansible.builtin.apt_key:
+    url: "{{ libnvidia_container_repo_gpg_url }}"
+    state: present
+
+- name: Add repo
+  ansible.builtin.get_url:
+    url: "{{ libnvidia_container_repo_base_url }}/stable/deb/{{ ubuntu_repo_file_name }}"
+    dest: "{{ ubuntu_repo_file_path }}"
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Install packages
+  vars:
+    package_name:
+      - libnvidia-container-tools{{ libnvidia_container_tools_package_version | ternary("=" + libnvidia_container_tools_package_version, "") }}
+    package_state: "{{ libnvidia_container_tools_package_state }}"
+    package_cache: true
+  ansible.builtin.include_role:
+    name: safe_yum
+
+- name: Install nvidia-container-toolkit
+  vars:
+    package_name:
+      - nvidia-container-toolkit
+    package_state: latest
+    package_cache: true
+  ansible.builtin.include_role:
+    name: safe_yum
+
+- name: Start Docker
+  ansible.builtin.service:
+    name: "docker"
+    state: restarted

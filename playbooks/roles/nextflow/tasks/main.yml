@@ -1,0 +1,84 @@
+---
+- name: Install java-openjdk for nextflow
+  apt:
+    update_cache: yes
+    name: "{{ packages }}"
+    state: present
+  vars:
+    packages:
+      - openjdk-21-jdk
+  when: ansible_facts['distribution'] == 'Ubuntu'
+
+- name: Download Nextflow launcher
+  ansible.builtin.get_url:
+    url: https://get.nextflow.io
+    dest: /usr/local/bin/nextflow
+    mode: '0755'
+  register: nextflow_launcher
+  retries: 20
+  delay: 15
+  until: nextflow_launcher is succeeded
+
+- name: Bootstrap Nextflow runtime
+  ansible.builtin.command: /usr/local/bin/nextflow -version
+  environment:
+    TERM: xterm
+    NXF_ANSI_LOG: "false"
+  register: nextflow_bootstrap_output
+  changed_when: false
+  failed_when: nextflow_bootstrap_output.rc != 0
+
+- name: Set container runtime architecture
+  ansible.builtin.set_fact:
+    singularity_deb_arch: "{{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else 'amd64' }}"
+
+- name: Install Apptainer package dependencies for ARM64
+  ansible.builtin.apt:
+    update_cache: yes
+    name:
+      - software-properties-common
+    state: present
+  when: ansible_facts['architecture'] == 'aarch64'
+
+- name: Add Apptainer PPA for ARM64
+  ansible.builtin.apt_repository:
+    repo: ppa:apptainer/ppa
+    state: present
+    update_cache: yes
+  when: ansible_facts['architecture'] == 'aarch64'
+
+- name: Install Apptainer for ARM64 Nextflow workloads
+  ansible.builtin.apt:
+    name: apptainer
+    state: present
+  when: ansible_facts['architecture'] == 'aarch64'
+
+- name: Download Singularity-ce
+  ansible.builtin.get_url:
+    url: "https://github.com/sylabs/singularity/releases/download/v4.3.3/singularity-ce_4.3.3-jammy_{{ singularity_deb_arch }}.deb"
+    dest: "/tmp/singularity-ce_4.3.3-jammy_{{ singularity_deb_arch }}.deb"
+    mode: '0644'
+  register: singularity_deb
+  retries: 20
+  delay: 15
+  until: singularity_deb is succeeded
+  when: ansible_facts['architecture'] != 'aarch64'
+
+- name: Install singularity-ce for rootless nextflow
+  ansible.builtin.apt:
+    deb: "/tmp/singularity-ce_4.3.3-jammy_{{ singularity_deb_arch }}.deb"
+    state: present
+  when: ansible_facts['architecture'] != 'aarch64'
+
+- name: Verify Nextflow installation
+  ansible.builtin.command: /usr/local/bin/nextflow -version
+  environment:
+    TERM: xterm
+    NXF_ANSI_LOG: "false"
+  register: nextflow_version_output
+  changed_when: false
+  failed_when: nextflow_version_output.rc != 0
+
+- name: Display Nextflow version
+  ansible.builtin.debug:
+    var: nextflow_version_output.stdout

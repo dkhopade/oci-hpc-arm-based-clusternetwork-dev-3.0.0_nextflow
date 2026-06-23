@@ -1,0 +1,57 @@
+---
+- name: Ensure keyrings directory exists
+  become: true
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Download Grafana APT GPG key
+  become: true
+  ansible.builtin.get_url:
+    url: https://apt.grafana.com/gpg.key
+    dest: /tmp/grafana.gpg.key
+    mode: '0644'
+
+- name: Convert Grafana key to dearmored keyring
+  become: true
+  ansible.builtin.shell: |
+    gpg --dearmor -o /etc/apt/keyrings/grafana.gpg /tmp/grafana.gpg.key
+    chmod 0644 /etc/apt/keyrings/grafana.gpg
+  args:
+    creates: /etc/apt/keyrings/grafana.gpg
+
+- name: Add Grafana APT repository
+  become: true
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main"
+    filename: grafana
+    state: present
+  register: apt_repo
+  until: apt_repo is not failed
+  retries: 10
+  delay: 20
+
+- name: Update apt cache
+  become: true
+  ansible.builtin.apt:
+    update_cache: true
+
+# Install packages directly with apt on Ubuntu/Debian
+- name: Install Grafana and Tempo
+  become: true
+  ansible.builtin.apt:
+    name:
+      - grafana
+      - tempo
+    state: present
+
+- name: Start and enable Grafana service
+  become: true
+  ansible.builtin.service:
+    name: grafana-server
+    state: restarted
+    enabled: true
+
+- name: Setup Grafana
+  ansible.builtin.include_tasks: setup_grafana.yml

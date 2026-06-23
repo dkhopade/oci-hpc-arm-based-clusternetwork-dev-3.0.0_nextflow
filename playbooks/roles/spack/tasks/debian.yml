@@ -1,0 +1,38 @@
+---
+- name: Install GIT
+  vars:
+    package_name:
+      - git
+    package_state: latest
+  ansible.builtin.include_role:
+    name: safe_yum
+
+- name: Development Tools"
+  vars:
+    package_name:
+      - build-essential
+    package_state: latest
+  ansible.builtin.include_role:
+    name: safe_yum
+
+- name: Check if SPACK directory is present
+  ansible.builtin.stat:
+    path: "/config/3rdparty/spack"
+  register: spack_present
+
+- name: Clone SPACK
+  ansible.builtin.git:
+    repo: "{{ spack_repo }}"
+    dest: "/config/3rdparty/spack"
+    update: false
+  run_once: true
+  when: not spack_present.stat.exists
+
+- name: Add SPACK initialization
+  ansible.builtin.template:
+    src: templates/spack.j2
+    dest: /etc/profile.d/spack.sh
+    owner: root
+    group: root
+    mode: "0755"
+  become: true

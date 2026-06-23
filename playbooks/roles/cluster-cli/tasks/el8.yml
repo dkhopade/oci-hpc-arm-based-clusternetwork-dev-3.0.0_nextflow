@@ -1,0 +1,8 @@
+---
+- name: Copy cluster cli
+  template:
+    src: cluster.j2
+    dest: /usr/bin/cluster
+    owner: root
+    group: root
+    mode: "0755"

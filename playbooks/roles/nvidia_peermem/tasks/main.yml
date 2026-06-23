@@ -1,0 +1,3 @@
+---
+# tasks file for nvidia_peermem
+- ansible.builtin.include_tasks: common.yml

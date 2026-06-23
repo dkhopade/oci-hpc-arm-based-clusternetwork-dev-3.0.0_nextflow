@@ -1,0 +1,66 @@
+---
+- name: Restart slurm server
+  become: true
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: restarted
+    enabled: true
+  with_items: "{{ ['slurmctld'] if slurm_federation | bool else ['slurmdbd', 'slurmctld'] }}"
+  register: result
+  until: result is not failed
+  retries: 5
+  delay: 5
+
+- name: Restart slurm
+  become: true
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: restarted
+    enabled: true
+  with_items:
+    - slurmd
+  register: result
+  until: result is not failed
+  retries: 5
+  delay: 5
+
+- name: Restart munge
+  become: true
+  ansible.builtin.service:
+    name: munge
+    state: restarted
+    enabled: true
+
+- name: Reconfigure slurm
+  become: true
+  listen: Reconfigure slurm
+  ansible.builtin.service:
+    name: munge
+    state: started
+    enabled: true
+
+- name: Ensure Slurm controller services are running before reconfigure
+  become: true
+  listen: Reconfigure slurm
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  with_items: "{{ ['slurmctld'] if slurm_federation | bool else ['slurmdbd', 'slurmctld'] }}"
+  register: slurm_controller_services
+  until: slurm_controller_services is not failed
+  retries: 5
+  delay: 5
+
+- name: Restart Slurm controller services to load config changes
+  become: true
+  listen: Reconfigure slurm
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: restarted
+    enabled: true
+  with_items: "{{ ['slurmctld'] if slurm_federation | bool else ['slurmdbd', 'slurmctld'] }}"
+  register: slurm_controller_restart
+  until: slurm_controller_restart is not failed
+  retries: 5
+  delay: 5

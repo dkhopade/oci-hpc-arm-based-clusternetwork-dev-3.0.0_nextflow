@@ -374,36 +374,33 @@ For a larger A1 cluster with 50 single-OCPU nodes, set `queueSize = 50`. Keep `c
 
 ## Patch nf-core Software Version Metadata
 
-The ARM64 toolbox can emit version strings that make nf-core/rnaseq `3.14.0` software-version collation fail. Patch the cached template before running:
+The ARM64 toolbox can emit version strings that make nf-core/rnaseq `3.14.0` software-version collation fail in the final `CUSTOM_DUMPSOFTWAREVERSIONS` task. In the validated 24-sample run, the analysis tasks completed successfully, but final reporting failed because a Samtools version string contained non-UTF8 bytes and unquoted colon-separated text such as `Features: build=configure`.
+
+Patch the cached nf-core template before running a full A1 ARM64 job:
 
 ```bash
 export NXF_HOME=/config/nextflow-home
 export NXF_SYNTAX_PARSER=v1
 nextflow pull nf-core/rnaseq -r 3.14.0
 
-python3 - <<'PY'
-from pathlib import Path
-for p in Path("/config/nextflow-home/assets/.repos/nf-core/rnaseq/clones").glob(
-    "*/modules/nf-core/custom/dumpsoftwareversions/templates/dumpsoftwareversions.py"
-):
-    s = p.read_text()
-    s = s.replace("import yaml\n", "import yaml\nimport json\n")
-    s = s.replace(
-        'with open("collated_versions.yml") as f:\n        versions_by_process = yaml.load(f, Loader=yaml.BaseLoader) | versions_this_module',
-        '''raw = open("collated_versions.yml", "rb").read().decode("utf-8", "replace")
-    safe_lines = []
-    for line in raw.splitlines():
-        if line.startswith("    ") and ": " in line:
-            k, v = line.split(": ", 1)
-            safe_lines.append(f"{k}: {json.dumps(v)}")
-        else:
-            safe_lines.append(line)
-    versions_by_process = yaml.load("\\n".join(safe_lines), Loader=yaml.BaseLoader) | versions_this_module'''
-    )
-    p.write_text(s)
-    print("patched", p)
-PY
+python3 /path/to/repo/scripts/patch_nfcore_rnaseq_dumpsoftwareversions.py
 ```
+
+When running from this repository on the login node, replace `/path/to/repo` with the cloned stack path. You can also pass an explicit template glob:
+
+```bash
+python3 scripts/patch_nfcore_rnaseq_dumpsoftwareversions.py \
+  '/config/nextflow-home/assets/.repos/nf-core/rnaseq/clones/*/modules/nf-core/custom/dumpsoftwareversions/templates/dumpsoftwareversions.py'
+```
+
+Verify the patch:
+
+```bash
+grep -R -n 'raw_versions\|cleaned_lines\|chr(10).join' \
+  /config/nextflow-home/assets/.repos/nf-core/rnaseq/clones/*/modules/nf-core/custom/dumpsoftwareversions/templates/dumpsoftwareversions.py
+```
+
+This is a local compatibility patch for the custom ARM64 toolbox path. It should not be confused with an upstream nf-core fix.
 
 ## Smoke Test
 
@@ -518,3 +515,4 @@ Important outputs should include:
 
 If Nextflow says the pipeline completed successfully but report rendering warns, treat the analysis outputs as valid and inspect `.nextflow.log` separately for the report-rendering warning.
 
+The validated full 24-sample A1 run completed the compute-heavy work in approximately 399 minutes on two single-OCPU A1 compute nodes. A later `-resume` completed final reporting after applying the software-version metadata patch above.
